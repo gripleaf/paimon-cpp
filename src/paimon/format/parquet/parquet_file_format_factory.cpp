@@ -20,14 +20,30 @@
 
 #include "paimon/factories/factory.h"
 #include "paimon/format/parquet/parquet_file_format.h"
+#include "paimon/format/parquet/parquet_metadata_cache.h"
 
 namespace paimon::parquet {
 
 const char ParquetFileFormatFactory::IDENTIFIER[] = "parquet";
 
+ParquetFileFormatFactory::ParquetFileFormatFactory()
+    : metadata_cache_(std::make_shared<ParquetMetadataCache>(0)) {}
+
+ParquetFileFormatFactory::~ParquetFileFormatFactory() = default;
+
 Result<std::unique_ptr<FileFormat>> ParquetFileFormatFactory::Create(
     const std::map<std::string, std::string>& options) const {
-    return std::make_unique<ParquetFileFormat>(options);
+    // Inject the cache only if it is currently enabled (max weight > 0). When
+    // disabled by ResizeMetadataCache(0), pass nullptr so downstream readers behave
+    // identically to "no cache configured".
+    std::shared_ptr<ParquetMetadataCache> cache =
+        metadata_cache_->GetMaxWeight() > 0 ? metadata_cache_ : nullptr;
+    return std::make_unique<ParquetFileFormat>(options, std::move(cache));
+}
+
+Status ParquetFileFormatFactory::ResizeMetadataCache(int64_t max_bytes) {
+    metadata_cache_->SetMaxWeight(max_bytes);
+    return Status::OK();
 }
 
 REGISTER_PAIMON_FACTORY(ParquetFileFormatFactory);

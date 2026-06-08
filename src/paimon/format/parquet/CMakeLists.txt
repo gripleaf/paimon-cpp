@@ -19,8 +19,10 @@ set(PAIMON_PARQUET_FILE_FORMAT
     page_filtered_row_group_reader.cpp
     parquet_timestamp_converter.cpp
     parquet_file_batch_reader.cpp
+    parquet_file_format.cpp
     parquet_file_format_factory.cpp
     parquet_format_writer.cpp
+    parquet_metadata_cache.cpp
     parquet_schema_util.cpp
     parquet_stats_extractor.cpp
     parquet_writer_builder.cpp
@@ -57,6 +59,7 @@ if(PAIMON_BUILD_TESTS)
                     parquet_field_id_converter_test.cpp
                     parquet_file_batch_reader_test.cpp
                     parquet_format_writer_test.cpp
+                    parquet_metadata_cache_test.cpp
                     parquet_stats_extractor_test.cpp
                     parquet_writer_builder_test.cpp
                     predicate_converter_test.cpp

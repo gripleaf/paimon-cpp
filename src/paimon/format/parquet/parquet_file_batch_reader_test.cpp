@@ -143,7 +143,8 @@ class ParquetFileBatchReaderTest : public ::testing::Test,
         const std::optional<RoaringBitmap32>& selection_bitmap, int32_t batch_size) const {
         EXPECT_OK_AND_ASSIGN(
             auto parquet_batch_reader,
-            ParquetFileBatchReader::Create(std::move(in_stream), pool_, options, batch_size));
+            ParquetFileBatchReader::Create(std::move(in_stream), pool_, options, batch_size,
+                                           /*file_metadata=*/nullptr));
         std::unique_ptr<ArrowSchema> c_schema = std::make_unique<ArrowSchema>();
         auto arrow_status = arrow::ExportSchema(*read_schema, c_schema.get());
         EXPECT_TRUE(arrow_status.ok());
@@ -203,6 +204,38 @@ TEST_F(ParquetFileBatchReaderTest, TestReadBinaryWrittenFromBinaryAndLargeBinary
     check_binary_read_result(arrow::large_binary(), "large-binary.parquet");
 }
 
+TEST_F(ParquetFileBatchReaderTest, TestReadRewrittenFileWithoutMetadataCache) {
+    auto field = arrow::field("f0", arrow::int32());
+    auto schema = arrow::schema({field});
+
+    auto first_array = std::dynamic_pointer_cast<arrow::StructArray>(
+        arrow::ipc::internal::json::ArrayFromJSON(arrow::struct_({field}), R"([[1]])")
+            .ValueOrDie());
+    WriteArray(file_path_, first_array, schema, /*write_batch_size=*/first_array->length(),
+               /*enable_dictionary=*/false, /*max_row_group_length=*/first_array->length());
+
+    auto first_reader = PrepareParquetFileBatchReader(
+        file_path_, schema, /*predicate=*/nullptr, /*selection_bitmap=*/std::nullopt, batch_size_);
+    ASSERT_OK_AND_ASSIGN(auto first_result,
+                         paimon::test::ReadResultCollector::CollectResult(first_reader.get()));
+    auto first_expected = std::make_shared<arrow::ChunkedArray>(first_array);
+    ASSERT_TRUE(first_result->Equals(first_expected));
+
+    auto second_array = std::dynamic_pointer_cast<arrow::StructArray>(
+        arrow::ipc::internal::json::ArrayFromJSON(arrow::struct_({field}),
+                                                  R"([[1], [2], [3], [4]])")
+            .ValueOrDie());
+    WriteArray(file_path_, second_array, schema, /*write_batch_size=*/second_array->length(),
+               /*enable_dictionary=*/false, /*max_row_group_length=*/second_array->length());
+
+    auto second_reader = PrepareParquetFileBatchReader(
+        file_path_, schema, /*predicate=*/nullptr, /*selection_bitmap=*/std::nullopt, batch_size_);
+    ASSERT_OK_AND_ASSIGN(auto second_result,
+                         paimon::test::ReadResultCollector::CollectResult(second_reader.get()));
+    auto second_expected = std::make_shared<arrow::ChunkedArray>(second_array);
+    ASSERT_TRUE(second_result->Equals(second_expected));
+}
+
 TEST_F(ParquetFileBatchReaderTest, TestSimple) {
     std::string file_name = paimon::test::GetDataDir() +
                             "/parquet/parquet_append_table.db/parquet_append_table/bucket-0/"
@@ -229,7 +262,8 @@ TEST_F(ParquetFileBatchReaderTest, TestSetReadSchema) {
     std::map<std::string, std::string> options;
     ASSERT_OK_AND_ASSIGN(
         auto parquet_batch_reader,
-        ParquetFileBatchReader::Create(std::move(in_stream), pool_, options, batch_size_));
+        ParquetFileBatchReader::Create(std::move(in_stream), pool_, options, batch_size_,
+                                       /*file_metadata=*/nullptr));
     // test GetFileSchema()
     ASSERT_OK_AND_ASSIGN(auto c_file_schema, parquet_batch_reader->GetFileSchema());
     auto arrow_file_schema = arrow::ImportSchema(c_file_schema.get()).ValueOrDie();

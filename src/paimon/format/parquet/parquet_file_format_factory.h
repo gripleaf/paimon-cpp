@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -26,9 +27,14 @@
 
 namespace paimon::parquet {
 
+class ParquetMetadataCache;
+
 class ParquetFileFormatFactory : public FileFormatFactory {
  public:
     static const char IDENTIFIER[];
+
+    ParquetFileFormatFactory();
+    ~ParquetFileFormatFactory() override;
 
     const char* Identifier() const override {
         return IDENTIFIER;
@@ -36,6 +42,19 @@ class ParquetFileFormatFactory : public FileFormatFactory {
 
     Result<std::unique_ptr<FileFormat>> Create(
         const std::map<std::string, std::string>& options) const override;
+
+    /// Resize the process-wide parquet metadata cache held by this factory.
+    /// `max_bytes <= 0` disables further caching: subsequent Create() calls inject
+    /// nullptr instead of the cache instance, and the cache is shrunk down to the
+    /// new limit immediately (entries evicted in LRU order). Note: the cache
+    /// instance itself is preserved across resizes so that the cache can be
+    /// re-enabled later without losing the singleton identity.
+    Status ResizeMetadataCache(int64_t max_bytes);
+
+ private:
+    /// Always non-null. Holds all currently cached entries; effective capacity is
+    /// controlled by the cache's internal max weight.
+    std::shared_ptr<ParquetMetadataCache> metadata_cache_;
 };
 
 }  // namespace paimon::parquet

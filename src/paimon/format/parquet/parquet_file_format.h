@@ -17,18 +17,21 @@
 #pragma once
 
 #include <cassert>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "arrow/c/bridge.h"
-#include "arrow/c/helpers.h"
 #include "paimon/common/utils/arrow/status_utils.h"
 #include "paimon/format/file_format.h"
 #include "paimon/format/parquet/parquet_field_id_converter.h"
+#include "paimon/format/parquet/parquet_metadata_cache.h"
 #include "paimon/format/parquet/parquet_reader_builder.h"
 #include "paimon/format/parquet/parquet_stats_extractor.h"
 #include "paimon/format/parquet/parquet_writer_builder.h"
+#include "paimon/result.h"
 
 struct ArrowSchema;
 
@@ -42,15 +45,16 @@ namespace parquet {
 
 class ParquetFileFormat : public FileFormat {
  public:
-    explicit ParquetFileFormat(const std::map<std::string, std::string>& options)
-        : identifier_("parquet"), options_(options) {}
+    ParquetFileFormat(const std::map<std::string, std::string>& options,
+                      std::shared_ptr<ParquetMetadataCache> metadata_cache)
+        : identifier_("parquet"), options_(options), metadata_cache_(std::move(metadata_cache)) {}
 
     const std::string& Identifier() const override {
         return identifier_;
     }
 
     Result<std::unique_ptr<ReaderBuilder>> CreateReaderBuilder(int32_t batch_size) const override {
-        return std::make_unique<ParquetReaderBuilder>(options_, batch_size);
+        return std::make_unique<ParquetReaderBuilder>(options_, batch_size, metadata_cache_);
     }
 
     Result<std::unique_ptr<WriterBuilder>> CreateWriterBuilder(::ArrowSchema* schema,
@@ -72,6 +76,9 @@ class ParquetFileFormat : public FileFormat {
  protected:
     std::string identifier_;
     std::map<std::string, std::string> options_;
+    /// Process-wide parquet metadata cache injected by the factory. May be nullptr
+    /// when the cache is disabled.
+    std::shared_ptr<ParquetMetadataCache> metadata_cache_;
 };
 
 }  // namespace parquet

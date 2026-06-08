@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -63,6 +64,8 @@ class GenericLruCache {
     /// Configuration options for the cache.
     struct Options {
         /// Maximum total weight of all entries. Entries are evicted (LRU) when exceeded.
+        /// Used only as the initial value for the cache's runtime-mutable max weight;
+        /// after construction, use GetMaxWeight()/SetMaxWeight() to read or update it.
         int64_t max_weight = INT64_MAX;
 
         /// Time in milliseconds after last access before an entry expires.
@@ -77,7 +80,8 @@ class GenericLruCache {
         RemovalCallback removal_callback = nullptr;
     };
 
-    explicit GenericLruCache(Options options) : options_(std::move(options)) {}
+    explicit GenericLruCache(Options options)
+        : options_(std::move(options)), max_weight_(options_.max_weight) {}
 
     /// Look up a key in the cache. On hit, promotes the entry to the front (most recently
     /// used) and updates its access time. Returns std::nullopt on miss or if the entry
@@ -101,7 +105,7 @@ class GenericLruCache {
         // Cache miss: load via supplier outside the lock
         PAIMON_ASSIGN_OR_RAISE(V value, supplier(key));
         int64_t weight = ComputeWeight(key, value);
-        if (weight > options_.max_weight) {
+        if (weight > max_weight_.load(std::memory_order_relaxed)) {
             return value;
         }
 
@@ -122,10 +126,11 @@ class GenericLruCache {
     /// @return Status::Invalid if the entry's weight exceeds max_weight, Status::OK otherwise.
     Status Put(const K& key, V value) {
         int64_t weight = ComputeWeight(key, value);
-        if (weight > options_.max_weight) {
+        int64_t max_weight = max_weight_.load(std::memory_order_relaxed);
+        if (weight > max_weight) {
             return Status::Invalid(
                 fmt::format("Entry weight {} exceeds cache max weight {}, entry will not be cached",
-                            weight, options_.max_weight));
+                            weight, max_weight));
         }
 
         std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -176,7 +181,22 @@ class GenericLruCache {
 
     /// @return The maximum weight configured for this cache.
     int64_t GetMaxWeight() const {
-        return options_.max_weight;
+        return max_weight_.load(std::memory_order_relaxed);
+    }
+
+    /// Update the maximum total weight at runtime. The new limit is published with
+    /// release semantics so subsequent insertions on other threads observe it without
+    /// needing the cache lock. After updating, this method also acquires the write
+    /// lock and runs EvictIfNeeded() so that:
+    ///   1. expired entries are reaped opportunistically;
+    ///   2. when the new limit is smaller than current_weight_, entries are evicted
+    ///      down to the new limit immediately rather than being held until the next
+    ///      insertion (relevant when the cache is being shrunk or disabled and no
+    ///      further inserts are expected).
+    void SetMaxWeight(int64_t new_max_weight) {
+        max_weight_.store(new_max_weight, std::memory_order_relaxed);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        EvictIfNeeded();
     }
 
  private:
@@ -267,7 +287,8 @@ class GenericLruCache {
     /// Evict expired entries from the tail, then evict by weight if still over capacity.
     void EvictIfNeeded() {
         EvictExpired();
-        while (current_weight_ > options_.max_weight && !lru_list_.empty()) {
+        while (current_weight_ > max_weight_.load(std::memory_order_relaxed) &&
+               !lru_list_.empty()) {
             RemoveEntry(std::prev(lru_list_.end()), RemovalCause::SIZE);
         }
     }
@@ -317,6 +338,10 @@ class GenericLruCache {
     }
 
     Options options_;
+    /// Runtime-mutable maximum total weight. Read on the hot path without holding
+    /// `mutex_` (e.g. in Get/Put before locking, and inside EvictIfNeeded under
+    /// the write lock). Writes go through SetMaxWeight() which uses relaxed atomics.
+    std::atomic<int64_t> max_weight_;
     int64_t current_weight_ = 0;
     EntryList lru_list_;
     EntryMap lru_map_;

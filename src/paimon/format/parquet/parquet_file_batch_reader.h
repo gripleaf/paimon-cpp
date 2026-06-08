@@ -64,7 +64,8 @@ class ParquetFileBatchReader : public PrefetchFileBatchReader {
     static Result<std::unique_ptr<ParquetFileBatchReader>> Create(
         std::shared_ptr<arrow::io::RandomAccessFile>&& input_stream,
         const std::shared_ptr<arrow::MemoryPool>& pool,
-        const std::map<std::string, std::string>& options, int32_t batch_size);
+        const std::map<std::string, std::string>& options, int32_t batch_size,
+        std::shared_ptr<::parquet::FileMetaData> file_metadata);
 
     // For timestamp type, we return the schema stored in file, e.g., second in parquet file will
     // store as milli.
@@ -171,6 +172,8 @@ class ParquetFileBatchReader : public PrefetchFileBatchReader {
                                const std::vector<int32_t>& src_row_groups);
 
  private:
+    friend class ParquetReaderBuilder;
+
     std::map<std::string, std::string> options_;
     // hold the lifecycle of arrow memory pool.
     std::shared_ptr<arrow::MemoryPool> arrow_pool_;
