@@ -262,7 +262,9 @@ TEST(CoreOptionsTest, TestFromMap) {
         {Options::LOOKUP_REMOTE_LEVEL_THRESHOLD, "2"},
         {Options::TABLE_READ_SEQUENCE_NUMBER_ENABLED, "true"},
         {Options::KEY_VALUE_SEQUENCE_NUMBER_ENABLED, "true"},
-        {Options::BUCKET_FUNCTION_TYPE, "mod"}};
+        {Options::BUCKET_FUNCTION_TYPE, "mod"},
+        {Options::SCAN_PK_SCHEMA_COMPATIBILITY_IGNORED_OPTIONS,
+         "custom\\.property, write\\..*"}};
 
     ASSERT_OK_AND_ASSIGN(CoreOptions core_options, CoreOptions::FromMap(options));
     auto fs = core_options.GetFileSystem();
@@ -404,6 +406,8 @@ TEST(CoreOptionsTest, TestFromMap) {
     ASSERT_TRUE(core_options.LookupRemoteFileEnabled());
     ASSERT_EQ(core_options.GetLookupRemoteLevelThreshold(), 2);
     ASSERT_EQ(BucketFunctionType::MOD, core_options.GetBucketFunctionType());
+    ASSERT_EQ((std::vector<std::string>{"custom\\.property", "write\\..*"}),
+              core_options.GetPKScanSchemaCompatibilityIgnoredOptions());
 }
 
 TEST(CoreOptionsTest, TestInvalidCase) {

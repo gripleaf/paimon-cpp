@@ -42,6 +42,7 @@
 #include "paimon/data/timestamp.h"
 #include "paimon/defs.h"
 #include "paimon/executor.h"
+#include "paimon/fs/file_system.h"
 #include "paimon/format/file_format.h"
 #include "paimon/memory/memory_pool.h"
 #include "paimon/metrics.h"
@@ -56,6 +57,16 @@ class Schema;
 }  // namespace arrow
 
 namespace paimon::test {
+namespace {
+
+void WriteSchemaFile(const std::shared_ptr<FileSystem>& fs, const std::string& table_path,
+                     int64_t schema_id, const std::string& schema_json) {
+    ASSERT_OK(fs->WriteFile(table_path + "/schema/schema-" + std::to_string(schema_id),
+                            schema_json, /*overwrite=*/false));
+}
+
+}  // namespace
+
 class KeyValueFileStoreScanTest : public testing::Test {
  public:
     void SetUp() override {
@@ -116,6 +127,46 @@ class KeyValueFileStoreScanTest : public testing::Test {
         PAIMON_ASSIGN_OR_RAISE(Snapshot snapshot, snapshot_manager->LoadSnapshot(snapshot_id));
         scan->WithSnapshot(snapshot);
         return scan;
+    }
+
+    Result<std::unique_ptr<KeyValueFileStoreScan>> CreateSchemaOnlyFileStoreScan(
+        const std::string& table_path, int32_t table_schema_id,
+        const std::map<std::string, std::string>& options_map) const {
+        PAIMON_ASSIGN_OR_RAISE(CoreOptions core_options, CoreOptions::FromMap(options_map));
+        auto fs = core_options.GetFileSystem();
+        auto schema_manager = std::make_shared<SchemaManager>(fs, table_path);
+        PAIMON_ASSIGN_OR_RAISE(std::shared_ptr<TableSchema> table_schema,
+                               schema_manager->ReadSchema(table_schema_id));
+        auto arrow_schema = DataField::ConvertDataFieldsToArrowSchema(table_schema->Fields());
+        PAIMON_ASSIGN_OR_RAISE(std::vector<std::string> external_paths,
+                               core_options.CreateExternalPaths());
+        PAIMON_ASSIGN_OR_RAISE(std::optional<std::string> global_index_external_path,
+                               core_options.CreateGlobalIndexExternalPath());
+        PAIMON_ASSIGN_OR_RAISE(
+            std::shared_ptr<FileStorePathFactory> path_factory,
+            FileStorePathFactory::Create(
+                table_path, arrow_schema, table_schema->PartitionKeys(),
+                core_options.GetPartitionDefaultName(), core_options.GetFileFormat()->Identifier(),
+                core_options.DataFilePrefix(), core_options.LegacyPartitionNameEnabled(),
+                external_paths, global_index_external_path, core_options.IndexFileInDataFileDir(),
+                pool_));
+        auto manifest_file_format = core_options.GetManifestFormat();
+        auto snapshot_manager = std::make_shared<SnapshotManager>(fs, table_path);
+        PAIMON_ASSIGN_OR_RAISE(
+            std::shared_ptr<ManifestList> manifest_list,
+            ManifestList::Create(fs, manifest_file_format, core_options.GetManifestCompression(),
+                                 path_factory, pool_));
+        PAIMON_ASSIGN_OR_RAISE(
+            std::shared_ptr<arrow::Schema> partition_schema,
+            FieldMapping::GetPartitionSchema(arrow_schema, table_schema->PartitionKeys()));
+        PAIMON_ASSIGN_OR_RAISE(
+            std::shared_ptr<ManifestFile> manifest_file,
+            ManifestFile::Create(fs, manifest_file_format, core_options.GetManifestCompression(),
+                                 path_factory, core_options.GetManifestTargetFileSize(), pool_,
+                                 core_options, partition_schema));
+        return KeyValueFileStoreScan::Create(
+            snapshot_manager, schema_manager, manifest_list, manifest_file, table_schema,
+            arrow_schema, /*scan_filters=*/nullptr, core_options, CreateDefaultExecutor(), pool_);
     }
 
     static int64_t GetMaxSequenceNumberOfRawPlan(
@@ -242,6 +293,71 @@ TEST_F(KeyValueFileStoreScanTest, TestMaxSequenceNumber) {
         int64_t max_sequence_num = GetMaxSequenceNumberOfRawPlan(raw_plan);
         ASSERT_EQ(max_sequence_num, 7);
     }
+}
+
+TEST_F(KeyValueFileStoreScanTest, TestCreateChecksPKScanSchemaCompatibility) {
+    auto dir = UniqueTestDirectory::Create();
+    const std::string path = dir->Str();
+    const std::string schema0 = R"({
+        "version" : 3,
+        "id" : 0,
+        "fields" : [ {
+                "id" : 0,
+                "name" : "pk",
+                "type" : "INT NOT NULL"
+        }, {
+                "id" : 1,
+                "name" : "v",
+                "type" : "STRING"
+        } ],
+        "highestFieldId" : 1,
+        "partitionKeys" : [],
+        "primaryKeys" : [ "pk" ],
+        "options" : {
+                "bucket" : "1",
+                "file.format" : "orc",
+                "manifest.format" : "orc"
+        },
+        "timeMillis" : 1000
+    })";
+    const std::string schema1_property_changed = R"({
+        "version" : 3,
+        "id" : 1,
+        "fields" : [ {
+                "id" : 0,
+                "name" : "pk",
+                "type" : "INT NOT NULL"
+        }, {
+                "id" : 1,
+                "name" : "v",
+                "type" : "STRING"
+        } ],
+        "highestFieldId" : 1,
+        "partitionKeys" : [],
+        "primaryKeys" : [ "pk" ],
+        "options" : {
+                "bucket" : "1",
+                "file.format" : "orc",
+                "manifest.format" : "orc",
+                "custom.property" : "new-value"
+        },
+        "timeMillis" : 2000
+    })";
+    WriteSchemaFile(dir->GetFileSystem(), path, /*schema_id=*/0, schema0);
+    WriteSchemaFile(dir->GetFileSystem(), path, /*schema_id=*/1, schema1_property_changed);
+
+    std::map<std::string, std::string> options = {{Options::FILE_FORMAT, "orc"},
+                                                  {Options::MANIFEST_FORMAT, "orc"}};
+    ASSERT_NOK_WITH_MSG(CreateSchemaOnlyFileStoreScan(path, /*table_schema_id=*/1, options),
+                        "do not support schema evolution");
+    ASSERT_NOK_WITH_MSG(CreateSchemaOnlyFileStoreScan(path, /*table_schema_id=*/0, options),
+                        "do not support schema evolution");
+
+    options[Options::SCAN_PK_SCHEMA_COMPATIBILITY_IGNORED_OPTIONS] = "custom\\.property";
+    ASSERT_OK_AND_ASSIGN([[maybe_unused]] std::unique_ptr<KeyValueFileStoreScan> scan,
+                         CreateSchemaOnlyFileStoreScan(path, /*table_schema_id=*/1, options));
+    ASSERT_OK_AND_ASSIGN([[maybe_unused]] std::unique_ptr<KeyValueFileStoreScan> scan_from_schema0,
+                         CreateSchemaOnlyFileStoreScan(path, /*table_schema_id=*/0, options));
 }
 
 TEST_F(KeyValueFileStoreScanTest, TestScanDurationMetric) {

@@ -508,6 +508,14 @@ struct PAIMON_EXPORT Options {
     /// "lookup.cache-max-disk-size" - Max disk size for lookup cache, you can use this option
     /// to limit the use of local disks. Default value is unlimited (INT64_MAX).
     static const char LOOKUP_CACHE_MAX_DISK_SIZE[];
+
+    /// "scan.pk.schema-compatibility.ignored-options" - A comma-separated list of regular
+    /// expressions describing option keys that are allowed to differ across schema versions when
+    /// performing the primary-key scan compatibility check. This is NOT general schema-evolution
+    /// support: it only permits property-only changes that do not affect the read semantics of
+    /// PK tables (e.g. write-side knobs). All other options must still be identical across schema
+    /// versions, otherwise the scan will fail. No default value (no extra options ignored).
+    static const char SCAN_PK_SCHEMA_COMPATIBILITY_IGNORED_OPTIONS[];
 };
 
 static constexpr int64_t BATCH_WRITE_COMMIT_IDENTIFIER = std::numeric_limits<int64_t>::max();

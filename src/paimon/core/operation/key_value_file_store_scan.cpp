@@ -33,6 +33,7 @@
 #include "paimon/core/core_options.h"
 #include "paimon/core/io/data_file_meta.h"
 #include "paimon/core/options/merge_engine.h"
+#include "paimon/core/schema/schema_manager.h"
 #include "paimon/core/schema/table_schema.h"
 #include "paimon/core/stats/simple_stats.h"
 #include "paimon/core/stats/simple_stats_evolution.h"
@@ -61,6 +62,14 @@ Result<std::unique_ptr<KeyValueFileStoreScan>> KeyValueFileStoreScan::Create(
     const std::shared_ptr<arrow::Schema>& arrow_schema,
     const std::shared_ptr<ScanFilter>& scan_filters, const CoreOptions& core_options,
     const std::shared_ptr<Executor>& executor, const std::shared_ptr<MemoryPool>& pool) {
+    PAIMON_ASSIGN_OR_RAISE(
+        bool compatible,
+        schema_manager->IsSchemasCompatibleForPKScan(
+            *table_schema, core_options.GetPKScanSchemaCompatibilityIgnoredOptions()));
+    if (!compatible) {
+        return Status::NotImplemented(
+            "do not support schema evolution in pk table while scan process");
+    }
     auto scan = std::unique_ptr<KeyValueFileStoreScan>(
         new KeyValueFileStoreScan(snapshot_manager, schema_manager, manifest_list, manifest_file,
                                   table_schema, arrow_schema, core_options, executor, pool));
@@ -188,15 +197,12 @@ Result<bool> KeyValueFileStoreScan::FilterByValueFilter(const ManifestEntry& ent
     }
 
     const auto& meta = entry.File();
-
-    // Primary key table currently does not support schema evolution for value filtering.
-    // Here we only handle `value_stats_cols` (dense stats) projection.
+    std::shared_ptr<TableSchema> data_schema = table_schema_;
     if (meta->schema_id != table_schema_->Id()) {
-        return Status::NotImplemented(
-            "Primary key table does not support schema evolution in FilterByValueFilter");
+        PAIMON_ASSIGN_OR_RAISE(data_schema, schema_manager_->ReadSchema(meta->schema_id));
     }
 
-    auto evolution = evolutions_->GetOrCreate(table_schema_);
+    auto evolution = evolutions_->GetOrCreate(data_schema);
 
     PAIMON_ASSIGN_OR_RAISE(
         SimpleStatsEvolution::EvolutionStats new_stats,

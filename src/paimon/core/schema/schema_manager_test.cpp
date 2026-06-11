@@ -16,16 +16,29 @@
 
 #include "paimon/core/schema/schema_manager.h"
 
+#include <cstdint>
+#include <memory>
 #include <set>
+#include <string>
 #include <utility>
 
 #include "arrow/type.h"
 #include "gtest/gtest.h"
+#include "paimon/fs/file_system.h"
 #include "paimon/fs/local/local_file_system.h"
 #include "paimon/status.h"
 #include "paimon/testing/utils/testharness.h"
 
 namespace paimon::test {
+namespace {
+
+void WriteSchemaFile(const std::shared_ptr<FileSystem>& fs, const std::string& table_path,
+                     int64_t schema_id, const std::string& schema_json) {
+    ASSERT_OK(fs->WriteFile(table_path + "/schema/schema-" + std::to_string(schema_id),
+                            schema_json, /*overwrite=*/false));
+}
+
+}  // namespace
 
 TEST(SchemaManagerTest, TestSimple) {
     auto fs = std::make_shared<LocalFileSystem>();
@@ -196,5 +209,119 @@ TEST(SchemaManagerTest, TestListAllIds) {
     SchemaManager manager(fs, table_root);
     ASSERT_OK_AND_ASSIGN(auto ids, manager.ListAllIds());
     ASSERT_EQ(std::set<int64_t>(ids.begin(), ids.end()), std::set<int64_t>({0, 1, 2, 3, 4}));
+}
+
+TEST(SchemaManagerTest, TestAllSchemasCompatibleForPrimaryKeyScan) {
+    auto dir = UniqueTestDirectory::Create();
+    const std::string path = dir->Str();
+    const std::string schema0 = R"({
+        "version" : 3,
+        "id" : 0,
+        "fields" : [ {
+                "id" : 0,
+                "name" : "pk",
+                "type" : "INT NOT NULL"
+        }, {
+                "id" : 1,
+                "name" : "v",
+                "type" : "STRING"
+        } ],
+        "highestFieldId" : 1,
+        "partitionKeys" : [],
+        "primaryKeys" : [ "pk" ],
+        "options" : {
+                "bucket" : "1",
+                "file.format" : "orc",
+                "manifest.format" : "orc"
+        },
+        "timeMillis" : 1000
+    })";
+    const std::string schema1_property_changed = R"({
+        "version" : 3,
+        "id" : 1,
+        "fields" : [ {
+                "id" : 0,
+                "name" : "pk",
+                "type" : "INT NOT NULL"
+        }, {
+                "id" : 1,
+                "name" : "v",
+                "type" : "STRING"
+        } ],
+        "highestFieldId" : 1,
+        "partitionKeys" : [],
+        "primaryKeys" : [ "pk" ],
+        "options" : {
+                "bucket" : "1",
+                "file.format" : "orc",
+                "manifest.format" : "orc",
+                "custom.property" : "new-value"
+        },
+        "timeMillis" : 2000
+    })";
+    const std::string schema2_field_changed = R"({
+        "version" : 3,
+        "id" : 2,
+        "fields" : [ {
+                "id" : 0,
+                "name" : "pk",
+                "type" : "INT NOT NULL"
+        }, {
+                "id" : 1,
+                "name" : "v",
+                "type" : "STRING"
+        }, {
+                "id" : 2,
+                "name" : "v2",
+                "type" : "STRING"
+        } ],
+        "highestFieldId" : 2,
+        "partitionKeys" : [],
+        "primaryKeys" : [ "pk" ],
+        "options" : {
+                "bucket" : "1",
+                "file.format" : "orc",
+                "manifest.format" : "orc"
+        },
+        "timeMillis" : 3000
+    })";
+
+    WriteSchemaFile(dir->GetFileSystem(), path, /*schema_id=*/0, schema0);
+    WriteSchemaFile(dir->GetFileSystem(), path, /*schema_id=*/1, schema1_property_changed);
+
+    SchemaManager manager(dir->GetFileSystem(), path);
+    ASSERT_OK_AND_ASSIGN(std::shared_ptr<TableSchema> compatible_schema,
+                         manager.ReadSchema(/*schema_id=*/1));
+    // Strict default: an unconfigured property change makes the schemas incompatible.
+    ASSERT_OK_AND_ASSIGN(bool default_compatible,
+                         manager.IsSchemasCompatibleForPKScan(*compatible_schema));
+    ASSERT_FALSE(default_compatible);
+
+    // After whitelisting `custom.property` via the ignored-options regex list, the property-only
+    // change is treated as compatible.
+    ASSERT_OK_AND_ASSIGN(bool compatible,
+                         manager.IsSchemasCompatibleForPKScan(
+                             *compatible_schema, {"custom\\.property"}));
+    ASSERT_TRUE(compatible);
+
+    // Self-compare must be skipped: passing schema 0 (which is identical to itself) and asking
+    // it to be compared against schema 1 with `custom.property` in the ignore list should still
+    // succeed without read errors and without the function returning false due to comparing a
+    // schema with itself.
+    ASSERT_OK_AND_ASSIGN(std::shared_ptr<TableSchema> base_schema,
+                         manager.ReadSchema(/*schema_id=*/0));
+    ASSERT_OK_AND_ASSIGN(bool self_skip_compatible,
+                         manager.IsSchemasCompatibleForPKScan(
+                             *base_schema, {"custom\\.property"}));
+    ASSERT_TRUE(self_skip_compatible);
+
+    WriteSchemaFile(dir->GetFileSystem(), path, /*schema_id=*/2, schema2_field_changed);
+    ASSERT_OK_AND_ASSIGN(std::shared_ptr<TableSchema> incompatible_schema,
+                         manager.ReadSchema(/*schema_id=*/2));
+    // Field-shape changes remain incompatible regardless of the ignored-options config.
+    ASSERT_OK_AND_ASSIGN(bool incompatible,
+                         manager.IsSchemasCompatibleForPKScan(
+                             *incompatible_schema, {".*"}));
+    ASSERT_FALSE(incompatible);
 }
 }  // namespace paimon::test

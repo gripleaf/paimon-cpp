@@ -381,6 +381,7 @@ struct CoreOptions::Impl {
     std::vector<std::string> blob_descriptor_fields;
     std::vector<std::string> blob_view_fields;
     std::vector<std::string> blob_external_storage_fields;
+    std::vector<std::string> pk_scan_schema_compatibility_ignored_options;
 
     std::string partition_default_name = "__DEFAULT_PARTITION__";
     StartupMode startup_mode = StartupMode::Default();
@@ -721,6 +722,11 @@ struct CoreOptions::Impl {
         PAIMON_RETURN_NOT_OK(parser.Parse(Options::BRANCH, &branch));
         // Parse scan.tag-name - optional tag name for "from-snapshot" scan mode
         PAIMON_RETURN_NOT_OK(parser.Parse(Options::SCAN_TAG_NAME, &scan_tag_name));
+        // Parse scan.pk.schema-compatibility.ignored-options - regex list of option keys that may
+        // differ across schema versions when doing the conservative PK scan compatibility check.
+        PAIMON_RETURN_NOT_OK(parser.ParseList<std::string>(
+            Options::SCAN_PK_SCHEMA_COMPATIBILITY_IGNORED_OPTIONS, Options::FIELDS_SEPARATOR,
+            &pk_scan_schema_compatibility_ignored_options, /*need_trim=*/true));
         return Status::OK();
     }
 
@@ -1261,6 +1267,10 @@ std::vector<std::string> CoreOptions::GetPartialUpdateRemoveRecordOnSequenceGrou
 
 std::optional<std::string> CoreOptions::GetScanFallbackBranch() const {
     return impl_->scan_fallback_branch;
+}
+
+const std::vector<std::string>& CoreOptions::GetPKScanSchemaCompatibilityIgnoredOptions() const {
+    return impl_->pk_scan_schema_compatibility_ignored_options;
 }
 
 std::string CoreOptions::GetBranch() const {

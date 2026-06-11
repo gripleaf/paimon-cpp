@@ -54,6 +54,7 @@
 #include "paimon/core/utils/file_store_path_factory.h"
 #include "paimon/core/utils/index_file_path_factories.h"
 #include "paimon/core/utils/snapshot_manager.h"
+#include "paimon/defs.h"
 #include "paimon/format/file_format.h"
 #include "paimon/result.h"
 #include "paimon/scan_context.h"
@@ -201,11 +202,6 @@ Result<std::unique_ptr<TableScan>> NewDataTableScan(const std::shared_ptr<ScanCo
         return Status::Invalid("not found latest schema");
     }
     const auto& table_schema = latest_table_schema.value();
-    if (table_schema->Id() != TableSchema::FIRST_SCHEMA_ID &&
-        !table_schema->PrimaryKeys().empty()) {
-        return Status::NotImplemented(
-            "do not support schema evolution in pk table while scan process");
-    }
     // merge options
     auto options = table_schema->Options();
     for (const auto& [key, value] : context->GetOptions()) {

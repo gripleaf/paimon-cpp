@@ -18,6 +18,8 @@
 
 #include <algorithm>
 #include <iterator>
+#include <optional>
+#include <regex>
 #include <set>
 #include <utility>
 
@@ -40,6 +42,50 @@
 #include "rapidjson/rapidjson.h"
 
 namespace paimon {
+namespace {
+
+std::optional<std::string> GetOptionValue(const std::map<std::string, std::string>& options,
+                                          const std::string& key) {
+    auto iter = options.find(key);
+    if (iter == options.end()) {
+        return std::nullopt;
+    }
+    return iter->second;
+}
+
+// Compile a list of regex patterns. Patterns that fail to compile are silently dropped, since the
+// configuration is user-provided and we do not want a single malformed entry to break scans on
+// otherwise compatible PK tables. The compiled regexes are matched against option keys using
+// `std::regex_match` (i.e. full-string match).
+std::vector<std::regex> CompileIgnoredOptionPatterns(
+    const std::vector<std::string>& patterns) {
+    std::vector<std::regex> compiled;
+    compiled.reserve(patterns.size());
+    for (const auto& raw : patterns) {
+        std::string pattern = raw;
+        StringUtils::Trim(&pattern);
+        if (pattern.empty()) {
+            continue;
+        }
+        try {
+            compiled.emplace_back(pattern);
+        } catch (const std::regex_error&) {
+            // Skip invalid patterns; users should rely on tests / logs to discover typos.
+        }
+    }
+    return compiled;
+}
+
+bool IsOptionKeyIgnored(const std::string& key, const std::vector<std::regex>& patterns) {
+    for (const auto& re : patterns) {
+        if (std::regex_match(key, re)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
 
 Result<std::unique_ptr<TableSchema>> TableSchema::Create(
     int64_t schema_id, const std::shared_ptr<arrow::Schema>& schema,
@@ -312,6 +358,39 @@ Result<std::vector<DataField>> TableSchema::TrimmedPrimaryKeyFields() const {
 Result<std::shared_ptr<arrow::Schema>> TableSchema::TrimmedPrimaryKeySchema() const {
     PAIMON_ASSIGN_OR_RAISE(std::vector<DataField> pk_fields, TrimmedPrimaryKeyFields());
     return DataField::ConvertDataFieldsToArrowSchema(pk_fields);
+}
+
+bool TableSchema::IsCompatibleForPKScan(
+    const TableSchema& data_schema,
+    const std::vector<std::string>& ignored_option_patterns) const {
+    if (fields_ != data_schema.fields_ || highest_field_id_ != data_schema.highest_field_id_ ||
+        partition_keys_ != data_schema.partition_keys_ ||
+        primary_keys_ != data_schema.primary_keys_ || bucket_keys_ != data_schema.bucket_keys_ ||
+        num_bucket_ != data_schema.num_bucket_) {
+        return false;
+    }
+
+    // Blacklist semantics: every option key participates in the equality check by default; only
+    // keys that match one of the user-provided regex patterns are allowed to differ. This keeps
+    // the check conservative for unknown / future options that may affect read semantics, while
+    // letting users opt-in to ignoring write-side / metadata-only properties they know are safe.
+    const std::vector<std::regex> ignored_patterns =
+        CompileIgnoredOptionPatterns(ignored_option_patterns);
+
+    auto compare_against = [&](const std::map<std::string, std::string>& lhs,
+                               const std::map<std::string, std::string>& rhs) {
+        for (const auto& [key, value] : lhs) {
+            if (IsOptionKeyIgnored(key, ignored_patterns)) {
+                continue;
+            }
+            if (GetOptionValue(rhs, key) != value) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return compare_against(options_, data_schema.options_) &&
+           compare_against(data_schema.options_, options_);
 }
 
 /// Original bucket keys, maybe empty.

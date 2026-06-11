@@ -429,6 +429,146 @@ TEST_F(TableSchemaTest, TestEmptyBucketKey) {
     }
 }
 
+TEST_F(TableSchemaTest, TestPrimaryKeyScanSchemaCompatibility) {
+    std::string schema0 = R"({
+        "version" : 3,
+        "id" : 0,
+        "fields" : [ {
+                "id" : 0,
+                "name" : "pk",
+                "type" : "INT NOT NULL"
+        }, {
+                "id" : 1,
+                "name" : "v",
+                "type" : "STRING"
+        } ],
+        "highestFieldId" : 1,
+        "partitionKeys" : [],
+        "primaryKeys" : [ "pk" ],
+        "options" : {
+                "bucket" : "2",
+                "file.format" : "orc",
+                "manifest.format" : "orc"
+        },
+        "timeMillis" : 1000
+    })";
+    std::string schema1_only_property_changed = R"({
+        "version" : 3,
+        "id" : 1,
+        "fields" : [ {
+                "id" : 0,
+                "name" : "pk",
+                "type" : "INT NOT NULL"
+        }, {
+                "id" : 1,
+                "name" : "v",
+                "type" : "STRING"
+        } ],
+        "highestFieldId" : 1,
+        "partitionKeys" : [],
+        "primaryKeys" : [ "pk" ],
+        "options" : {
+                "bucket" : "2",
+                "file.format" : "orc",
+                "manifest.format" : "orc",
+                "user.property" : "new-value"
+        },
+        "timeMillis" : 2000
+    })";
+    std::string schema1_field_changed = R"({
+        "version" : 3,
+        "id" : 1,
+        "fields" : [ {
+                "id" : 0,
+                "name" : "pk",
+                "type" : "INT NOT NULL"
+        }, {
+                "id" : 1,
+                "name" : "v",
+                "type" : "STRING"
+        }, {
+                "id" : 2,
+                "name" : "v2",
+                "type" : "STRING"
+        } ],
+        "highestFieldId" : 2,
+        "partitionKeys" : [],
+        "primaryKeys" : [ "pk" ],
+        "options" : {
+                "bucket" : "2",
+                "file.format" : "orc",
+                "manifest.format" : "orc"
+        },
+        "timeMillis" : 2000
+    })";
+    std::string schema1_read_option_changed = R"({
+        "version" : 3,
+        "id" : 1,
+        "fields" : [ {
+                "id" : 0,
+                "name" : "pk",
+                "type" : "INT NOT NULL"
+        }, {
+                "id" : 1,
+                "name" : "v",
+                "type" : "STRING"
+        } ],
+        "highestFieldId" : 1,
+        "partitionKeys" : [],
+        "primaryKeys" : [ "pk" ],
+        "options" : {
+                "bucket" : "2",
+                "file.format" : "orc",
+                "manifest.format" : "orc",
+                "merge-engine" : "partial-update"
+        },
+        "timeMillis" : 2000
+    })";
+
+    ASSERT_OK_AND_ASSIGN(std::unique_ptr<TableSchema> base_schema,
+                         TableSchema::CreateFromJson(schema0));
+    ASSERT_OK_AND_ASSIGN(std::unique_ptr<TableSchema> property_changed,
+                         TableSchema::CreateFromJson(schema1_only_property_changed));
+    ASSERT_OK_AND_ASSIGN(std::unique_ptr<TableSchema> field_changed,
+                         TableSchema::CreateFromJson(schema1_field_changed));
+    ASSERT_OK_AND_ASSIGN(std::unique_ptr<TableSchema> read_option_changed,
+                         TableSchema::CreateFromJson(schema1_read_option_changed));
+
+    // Default behavior is a strict blacklist: ANY option-key difference is incompatible.
+    ASSERT_FALSE(property_changed->IsCompatibleForPKScan(*base_schema));
+    ASSERT_FALSE(base_schema->IsCompatibleForPKScan(*property_changed));
+    ASSERT_FALSE(field_changed->IsCompatibleForPKScan(*base_schema));
+    ASSERT_FALSE(read_option_changed->IsCompatibleForPKScan(*base_schema));
+
+    // Users may opt-in to ignoring specific option keys via regex patterns; once
+    // `user.property` is whitelisted, the property-only change becomes compatible. Field changes
+    // remain incompatible regardless of the ignored-options config.
+    const std::vector<std::string> ignore_user_property = {"user\\.property"};
+    ASSERT_TRUE(property_changed->IsCompatibleForPKScan(*base_schema,
+                                                                ignore_user_property));
+    ASSERT_TRUE(base_schema->IsCompatibleForPKScan(*property_changed,
+                                                           ignore_user_property));
+    ASSERT_FALSE(field_changed->IsCompatibleForPKScan(*base_schema,
+                                                              ignore_user_property));
+    // Read-relevant options (e.g. merge-engine) are still considered incompatible even if the
+    // ignore list does not cover them.
+    ASSERT_FALSE(read_option_changed->IsCompatibleForPKScan(*base_schema,
+                                                                    ignore_user_property));
+
+    // A wildcard regex matches any key, so all property-only differences are ignored. Read
+    // option changes therefore become compatible too — this is intentional: users opting-in
+    // to such broad patterns explicitly take responsibility.
+    const std::vector<std::string> ignore_all = {".*"};
+    ASSERT_TRUE(read_option_changed->IsCompatibleForPKScan(*base_schema, ignore_all));
+    // Field-level changes are still always incompatible since they are checked before options.
+    ASSERT_FALSE(field_changed->IsCompatibleForPKScan(*base_schema, ignore_all));
+
+    // Invalid regex patterns are silently ignored, so a malformed entry must not cause the
+    // function to crash or to suddenly accept previously-rejected schemas.
+    const std::vector<std::string> only_invalid = {"["};
+    ASSERT_FALSE(property_changed->IsCompatibleForPKScan(*base_schema, only_invalid));
+}
+
 TEST_F(TableSchemaTest, TestToJson) {
     auto field1 = DataField(0, arrow::field("f0", arrow::utf8()));
     auto field2 = DataField(1, arrow::field("f1", arrow::int32()));

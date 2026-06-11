@@ -66,16 +66,25 @@ Result<std::optional<std::shared_ptr<TableSchema>>> SchemaManager::Latest() cons
 }
 
 Result<std::shared_ptr<TableSchema>> SchemaManager::ReadSchema(int64_t schema_id) const {
-    auto iter = schema_cache_.find(schema_id);
-    if (iter != schema_cache_.end()) {
-        return iter->second;
+    {
+        std::lock_guard<std::mutex> lock(schema_cache_mutex_);
+        auto iter = schema_cache_.find(schema_id);
+        if (iter != schema_cache_.end()) {
+            return iter->second;
+        }
     }
     auto path = ToSchemaPath(schema_id);
     std::string content;
     PAIMON_RETURN_NOT_OK(file_system_->ReadFile(path, &content));
     PAIMON_ASSIGN_OR_RAISE(std::shared_ptr<TableSchema> schema,
                            TableSchema::CreateFromJson(content));
-    schema_cache_[schema_id] = schema;
+    {
+        std::lock_guard<std::mutex> lock(schema_cache_mutex_);
+        // Another thread may have raced us; either entry is functionally identical so we just
+        // overwrite (or insert) and return the schema we read. Returning the cached entry would
+        // also be correct, but is not necessary for correctness.
+        schema_cache_[schema_id] = schema;
+    }
     return schema;
 }
 
@@ -93,6 +102,25 @@ Result<std::vector<int64_t>> SchemaManager::ListAllIds() const {
     PAIMON_RETURN_NOT_OK(FileUtils::ListVersionedFiles(file_system_, SchemaDirectory(),
                                                        std::string(SCHEMA_PREFIX), &versions));
     return versions;
+}
+
+Result<bool> SchemaManager::IsSchemasCompatibleForPKScan(
+    const TableSchema& table_schema,
+    const std::vector<std::string>& ignored_option_patterns) const {
+    PAIMON_ASSIGN_OR_RAISE(std::vector<int64_t> schema_ids, ListAllIds());
+    for (int64_t schema_id : schema_ids) {
+        // Skip self-compare: comparing a schema against itself is trivially true and would only
+        // waste a file read (or cache lookup). This also keeps the check meaningful in the
+        // common single-schema case.
+        if (schema_id == table_schema.Id()) {
+            continue;
+        }
+        PAIMON_ASSIGN_OR_RAISE(std::shared_ptr<TableSchema> schema, ReadSchema(schema_id));
+        if (!table_schema.IsCompatibleForPKScan(*schema, ignored_option_patterns)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 Result<std::unique_ptr<TableSchema>> SchemaManager::CreateTable(

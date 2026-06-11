@@ -133,6 +133,7 @@ class PAIMON_EXPORT CoreOptions {
     std::vector<std::string> GetPartialUpdateRemoveRecordOnSequenceGroup() const;
 
     std::optional<std::string> GetScanFallbackBranch() const;
+    const std::vector<std::string>& GetPKScanSchemaCompatibilityIgnoredOptions() const;
     std::string GetBranch() const;
 
     ExternalPathStrategy GetExternalPathStrategy() const;

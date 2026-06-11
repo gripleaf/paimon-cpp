@@ -104,6 +104,18 @@ class TableSchema : public DataSchema, public Jsonizable<TableSchema> {
     Result<std::vector<DataField>> TrimmedPrimaryKeyFields() const;
     Result<std::shared_ptr<arrow::Schema>> TrimmedPrimaryKeySchema() const;
 
+    // This is not schema evolution support. It only checks whether two schema versions are
+    // equivalent for primary-key scan, so property-only changes can reuse the normal read path.
+    //
+    // Compatibility model: The two schemas must agree on every aspect that affects PK read
+    // semantics (fields, ids, partition / primary / bucket keys, num_bucket and ALL options).
+    // The only allowed differences are in option keys whose names match one of the regular
+    // expressions provided in `ignored_option_patterns` (full match), which lets users opt-in
+    // to ignoring a known set of write-side / metadata-only properties.
+    bool IsCompatibleForPKScan(
+        const TableSchema& data_schema,
+        const std::vector<std::string>& ignored_option_patterns = {}) const;
+
     std::optional<std::string> Comment() const override {
         return comment_;
     }
