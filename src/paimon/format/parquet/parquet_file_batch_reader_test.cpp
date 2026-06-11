@@ -101,13 +101,20 @@ class ParquetFileBatchReaderTest : public ::testing::Test,
 
     void WriteArray(const std::string& file_path, const std::shared_ptr<arrow::Array>& src_array,
                     const std::shared_ptr<arrow::Schema>& arrow_schema, int64_t write_batch_size,
-                    bool enable_dictionary, int64_t max_row_group_length) const {
+                    bool enable_dictionary, int64_t max_row_group_length,
+                    bool enable_page_index = false, int64_t data_page_size = 0) const {
         ASSERT_OK_AND_ASSIGN(std::shared_ptr<OutputStream> out,
                              fs_->Create(file_path, /*overwrite=*/true));
         ::parquet::WriterProperties::Builder builder;
         builder.write_batch_size(write_batch_size);
         builder.max_row_group_length(max_row_group_length);
         enable_dictionary ? builder.enable_dictionary() : builder.disable_dictionary();
+        if (enable_page_index) {
+            builder.enable_write_page_index();
+        }
+        if (data_page_size > 0) {
+            builder.data_pagesize(data_page_size);
+        }
         auto writer_properties = builder.build();
         ASSERT_OK_AND_ASSIGN(auto format_writer, ParquetFormatWriter::Create(
                                                      out, arrow_schema, writer_properties,
@@ -536,8 +543,11 @@ TEST_F(ParquetFileBatchReaderTest, TestPredicateAndBitmapPushDown) {
             std::shared_ptr<arrow::ChunkedArray> result_array,
             paimon::test::ReadResultCollector::CollectResult(parquet_batch_reader.get()));
 
+        // Page-index filtering is conservative for the predicate and precise for the bitmap:
+        // row 100 is in the row group that may match f0 < 255, and row 600 is in the row group
+        // that may match f0 > 600. No row-level predicate filter is applied in this reader test.
         auto expected_array =
-            arrow::ChunkedArray::Make({src_array->Slice(0, 256), src_array->Slice(512, 256)})
+            arrow::ChunkedArray::Make({src_array->Slice(100, 1), src_array->Slice(600, 1)})
                 .ValueOrDie();
         ASSERT_TRUE(result_array->Equals(expected_array)) << result_array->ToString();
     }
@@ -553,6 +563,59 @@ TEST_F(ParquetFileBatchReaderTest, TestPredicateAndBitmapPushDown) {
             paimon::test::ReadResultCollector::CollectResult(parquet_batch_reader.get()));
         ASSERT_FALSE(result_array);
     }
+}
+
+TEST_F(ParquetFileBatchReaderTest, TestPageIndexFilterIntersectsBitmapSelection) {
+    arrow::FieldVector fields = {arrow::field("f0", arrow::int32())};
+    auto arrow_type = arrow::struct_(fields);
+    arrow::StructBuilder struct_builder(arrow_type, arrow::default_memory_pool(),
+                                        {std::make_shared<arrow::Int32Builder>()});
+    auto int_builder = static_cast<arrow::Int32Builder*>(struct_builder.field_builder(0));
+    constexpr int32_t length = 100;
+    for (int32_t i = 0; i < length; ++i) {
+        ASSERT_TRUE(struct_builder.Append().ok());
+        ASSERT_TRUE(int_builder->Append(i).ok());
+    }
+
+    std::shared_ptr<arrow::Array> src_array;
+    ASSERT_TRUE(struct_builder.Finish(&src_array).ok());
+    auto arrow_schema = arrow::schema(fields);
+    WriteArray(file_path_, src_array, arrow_schema, /*write_batch_size=*/10,
+               /*enable_dictionary=*/false,
+               /*max_row_group_length=*/length, /*enable_page_index=*/true,
+               /*data_page_size=*/1);
+
+    std::optional<RoaringBitmap32> bitmap = RoaringBitmap32::From({25, 45});
+    auto predicate = PredicateBuilder::LessThan(/*field_index=*/0, /*field_name=*/"f0",
+                                                FieldType::INT, Literal(length));
+    auto parquet_batch_reader = PrepareParquetFileBatchReader(
+        file_path_, arrow_schema, predicate, bitmap, /*batch_size=*/length);
+
+    auto metrics = parquet_batch_reader->GetReaderMetrics();
+    ASSERT_OK_AND_ASSIGN(
+        uint64_t total,
+        metrics->GetCounter(ParquetMetrics::READ_PAGE_INDEX_ROW_GROUPS_TOTAL));
+    ASSERT_OK_AND_ASSIGN(
+        uint64_t partial,
+        metrics->GetCounter(ParquetMetrics::READ_PAGE_INDEX_ROW_GROUPS_PARTIAL));
+    ASSERT_OK_AND_ASSIGN(
+        uint64_t skipped,
+        metrics->GetCounter(ParquetMetrics::READ_PAGE_INDEX_ROW_GROUPS_SKIPPED));
+    ASSERT_OK_AND_ASSIGN(
+        uint64_t fallback,
+        metrics->GetCounter(ParquetMetrics::READ_PAGE_INDEX_FALLBACK_COUNT));
+    ASSERT_EQ(1, total);
+    ASSERT_EQ(1, partial);
+    ASSERT_EQ(0, skipped);
+    ASSERT_EQ(0, fallback);
+
+    ASSERT_OK_AND_ASSIGN(
+        std::shared_ptr<arrow::ChunkedArray> result_array,
+        paimon::test::ReadResultCollector::CollectResult(parquet_batch_reader.get()));
+
+    auto expected_array =
+        arrow::ChunkedArray::Make({src_array->Slice(25, 1), src_array->Slice(45, 1)}).ValueOrDie();
+    ASSERT_TRUE(result_array->Equals(expected_array)) << result_array->ToString();
 }
 
 TEST_F(ParquetFileBatchReaderTest, TestReadNoField) {

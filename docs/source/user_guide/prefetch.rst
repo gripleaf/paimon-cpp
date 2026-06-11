@@ -35,9 +35,26 @@ Below we detail how these strategies are applied to formats Parquet.
 Parquet
 =======
 
-Parquet files are organized into RowGroups and Pages. Since C++ Parquet does not support row-level seeking, prefetching can only be done at the RowGroup level. This naturally avoids read amplification, but introduces a new challenge: if a file contains only a small number of RowGroups, parallelism is severely limited. Therefore, we recommend users reduce RowGroup size when writing Parquet files to increase opportunities for parallel processing.
+Parquet files are organized into RowGroups and Pages. For ordinary reads,
+prefetching is planned at the RowGroup level. This naturally avoids read
+amplification, but introduces a new challenge: if a file contains only a small
+number of RowGroups, parallelism is severely limited. Therefore, we recommend
+users reduce RowGroup size when writing Parquet files to increase opportunities
+for parallel processing.
 
 Another critical difference is the read behavior compared to Orc. Orc strictly returns RecordBatches aligned to Stripe boundaries, whereas C++ Parquet may return a RecordBatch containing data from multiple RowGroups. This can lead to output order confusion during parallel reads. We modified C++ Parquet internals to return results strictly aligned to RowGroup boundaries, matching Orc’s behavior. With this change, parallel reading no longer requires complex seek operations, improving overall read efficiency.
+
+When Parquet page index filtering is enabled, partially matched RowGroups can
+be prefetched at page granularity. Paimon C++ uses the Parquet OffsetIndex to
+convert matching pages into byte ranges. Dictionary pages are included when
+present, and matching data page ranges are merged before issuing pre-buffer
+requests. RowGroups that fully match the predicate still use the normal
+RowGroup or column-chunk prefetch path.
+
+Page-level prefetch is a best-effort optimization. If the file does not contain
+page index metadata, if an OffsetIndex is missing, or if the predicate cannot
+be evaluated safely with page-level statistics, Paimon C++ falls back to the
+ordinary RowGroup-level path.
 
 .. admonition:: TODO
   :class: tip

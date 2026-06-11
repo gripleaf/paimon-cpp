@@ -37,6 +37,110 @@ the two layers can evolve their functionality and optimize code relatively indep
 cross-language task scheduling and interaction (e.g., Java and C++), substantially reducing engineering maintenance costs
 across the two language ecosystems.
 
+Parquet Page Index Filtering
+----------------------------
+
+Paimon C++ supports page-level pruning for Parquet files that contain Parquet
+ColumnIndex and OffsetIndex metadata. This optimization narrows the read range
+after file-level and row-group-level pruning. It is useful for selective
+queries on Parquet files whose row groups contain multiple pages.
+
+The read path is layered as follows:
+
+1. File and row-group pruning
+   The scan and read path first applies existing file metadata and Parquet
+   row-group statistics pruning. For Parquet files, row-group pruning is
+   delegated to Arrow Dataset metadata filtering.
+
+2. Page index pruning
+   For the remaining row groups, Paimon C++ reads the Parquet page index and
+   evaluates the predicate against page-level min/max/null statistics. The
+   result is represented as row ranges inside each row group. A row group can
+   then be skipped, read fully, or read through a page-filtered path.
+
+3. Page-filtered reading
+   When only part of a row group may match, Paimon C++ uses the OffsetIndex to
+   map selected pages to byte ranges. Non-overlapping pages are skipped at the
+   Parquet page reader level, and the remaining rows are read with
+   ``SkipRecords`` and ``ReadRecords`` so that projected columns stay aligned.
+
+The page index filter is conservative for predicates. A page is skipped only
+when page-level statistics prove that no row in the page can match. If the
+metadata is missing or a predicate cannot be evaluated safely, the reader falls
+back to the full row group or full column chunk path.
+
+Supported Predicate Semantics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Page index filtering supports simple leaf predicates on Parquet leaf columns,
+and compound predicates built from them:
+
+- ``Equal`` keeps pages whose min/max range may contain the literal.
+- ``NotEqual`` skips only pages that are proven to contain no matching value.
+- ``LessThan`` and ``LessOrEqual`` use page minimum values.
+- ``GreaterThan`` and ``GreaterOrEqual`` use page maximum values.
+- ``IsNull`` and ``IsNotNull`` use null page and null count metadata when
+  available.
+- ``In`` is evaluated as the union of equality checks.
+- ``And`` intersects row ranges from child predicates.
+- ``Or`` unions row ranges from child predicates.
+
+Unsupported predicates, unsupported physical type comparisons, or missing page
+index metadata do not fail the read. They disable page-level pruning for the
+affected predicate or row group.
+
+Interaction with Bitmap Selection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When a selection bitmap is provided by deletion vectors, global indexes, or
+other upper-layer pruning, Paimon C++ first uses it to remove row groups that
+do not intersect the bitmap. If page index filtering is also active, the
+page-derived row ranges are intersected with the selection bitmap inside each
+remaining row group. This avoids reading pages and rows that are already known
+to be unselected.
+
+Configuration
+~~~~~~~~~~~~~
+
+The optimization is controlled by the following Parquet options:
+
+- ``parquet.write.enable-page-index``
+  Enables writing Parquet ColumnIndex and OffsetIndex metadata for newly
+  written files. The default value is ``true``.
+
+- ``parquet.read.enable-page-index-filter``
+  Enables page-level pruning during Parquet reads. The default value is
+  ``true``.
+
+- ``parquet.read.enable-pre-buffer``
+  Controls Parquet pre-buffer behavior. When page filtering is active, Paimon
+  C++ can pre-buffer selected page byte ranges instead of whole column chunks.
+
+Metrics
+~~~~~~~
+
+The reader exposes page-index related counters through reader metrics:
+
+- ``parquet.read.page-index.row-groups.total``
+- ``parquet.read.page-index.row-groups.skipped``
+- ``parquet.read.page-index.row-groups.partial``
+- ``parquet.read.page-index.fallback.count``
+
+These metrics help determine whether page index filtering is reducing the
+number of row groups and pages read, or falling back because page index metadata
+is unavailable.
+
+Limitations
+~~~~~~~~~~~
+
+- Page index filtering applies to Parquet leaf columns. Nested column predicate
+  pruning requires an unambiguous mapping from the Paimon field to a Parquet
+  leaf column.
+- It is an I/O pruning optimization, not a replacement for row-level predicate
+  evaluation. Page-level min/max statistics can only identify pages that may
+  match.
+- Existing files without Parquet page index metadata are read through the
+  normal row-group or column-chunk path.
 
 Schema Evolution
 -----------------------

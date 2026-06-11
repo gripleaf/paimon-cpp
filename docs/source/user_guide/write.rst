@@ -23,6 +23,18 @@ Paimon C++ uses Apache Arrow as the :ref:`in-memory columnar format<memory-forma
 to more efficiently support writing to disk columnar formats such as ORC and
 Parquet, thereby improving write throughput.
 
+Parquet Page Index Metadata
+---------------------------
+
+For Parquet files, Paimon C++ can write Parquet page index metadata
+(ColumnIndex and OffsetIndex). This metadata enables page-level pruning during
+reads when ``parquet.read.enable-page-index-filter`` is enabled.
+
+The write option ``parquet.write.enable-page-index`` controls whether page
+index metadata is written for newly created Parquet files. The default value is
+``true``. Existing Parquet files without page index metadata remain readable;
+they simply fall back to the normal row-group or column-chunk read path.
+
 .. note::
   Currently supported table types:
     - Append table

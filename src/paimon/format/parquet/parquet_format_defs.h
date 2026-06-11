@@ -91,6 +91,14 @@ class ParquetMetrics {
     static inline const char READ_ROW_GROUPS_TOTAL[] = "parquet.read.row-groups.total";
     static inline const char READ_ROW_GROUPS_AFTER_FILTER[] =
         "parquet.read.row-groups.after-filter";
+    static inline const char READ_PAGE_INDEX_ROW_GROUPS_TOTAL[] =
+        "parquet.read.page-index.row-groups.total";
+    static inline const char READ_PAGE_INDEX_ROW_GROUPS_SKIPPED[] =
+        "parquet.read.page-index.row-groups.skipped";
+    static inline const char READ_PAGE_INDEX_ROW_GROUPS_PARTIAL[] =
+        "parquet.read.page-index.row-groups.partial";
+    static inline const char READ_PAGE_INDEX_FALLBACK_COUNT[] =
+        "parquet.read.page-index.fallback.count";
     static inline const char READ_ROWS[] = "parquet.read.rows";
     static inline const char READ_BATCH_COUNT[] = "parquet.read.batch-count";
 };
